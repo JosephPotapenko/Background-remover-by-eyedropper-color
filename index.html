@@ -1,0 +1,834 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <title>Advanced Background Remover</title>
+  <style>
+    body { font-family: sans-serif; padding: 2rem; background: #f9f9f9; text-align: center; }
+    .image-container { border: 1px solid #ccc; margin: 1rem auto; display: inline-block; position: relative; }
+    canvas { cursor: crosshair; display: block; margin: 0 auto; }
+    .controls { margin: 0.5rem 0; }
+    label { margin-right: 1rem; }
+    button { margin: 0.5rem; }
+    .select-checkbox { position: absolute; top: 5px; left: 5px; }
+    #bottom-controls { margin-top: 2rem; }
+    details { margin: 1rem auto; text-align: left; max-width: 800px; }
+    .controls button.smooth-btn {
+      background-color: #ffc107;
+      color: #333;
+      border: none;
+      border-radius: 4px;
+    }
+    .controls button.trim-btn {
+      background-color: #17a2b8;
+      color: #fff;
+      border: none;
+      border-radius: 4px;
+    }
+    .controls button.spec-btn {
+      background-color: #343a40;
+      color: #fff;
+      border: none;
+      border-radius: 4px;
+    }
+    .controls button.undo-btn, .controls button.redo-btn {
+      background-color: #6c757d;
+      color: #fff;
+      border: none;
+      border-radius: 4px;
+    }
+    .controls button.eyedropper-btn {
+      background-color: #fd7e14;
+      color: #fff;
+      border: none;
+      border-radius: 4px;
+    }
+    .controls button.eyedropper-btn.active {
+      background-color: #c15500;
+    }
+    .controls button.remove-color-btn {
+      background-color: #198754;
+      color: #fff;
+      border: none;
+      border-radius: 4px;
+    }
+    .sprite-control-group {
+      display: inline-flex;
+      align-items: center;
+      gap: 0.5rem;
+      flex-wrap: wrap;
+      margin: 0.5rem;
+    }
+    .sprite-control-group input[type="range"] {
+      width: 110px;
+    }
+    .picked-color-swatch {
+      width: 20px;
+      height: 20px;
+      border: 1px solid #333;
+      display: inline-block;
+      vertical-align: middle;
+      margin-right: 6px;
+      background: transparent;
+    }
+  </style>
+</head>
+<body>
+  <h2>Advanced Background Remover</h2>
+  <details>
+    <summary style="max-width: 640px; margin: 0 auto 1em auto; text-align: center;"><strong>Instructions</strong></summary>
+    <p style="max-width: 640px; margin: 0 auto 1em auto;"></p>
+      Upload one or more images using the file input below. You can edit each image manually using the brush tools:
+      <br><span style="margin-left:2em;"><strong>Erase</strong></span> to remove,
+      <br><span style="margin-left:2em;"><strong>Restore</strong></span> to paint back original content, or use
+      <br><span style="margin-left:2em;"><strong>Magic Fill</strong></span> to remove areas with similar colors by clicking. Adjust brush size and tolerance as needed.
+      <br><br>Optionally, use the:
+      <br><span style="margin-left:2em;"><strong>Auto Process</strong></span> button under each image to automatically remove background based on edge detection. 
+      <br><br>All actions including auto-processing are undoable using the:
+      <br><span style="margin-left:2em;"><strong>Undo</strong></span> button. Select images and click
+      <br><span style="margin-left:2em;"><strong>Download Selected</strong></span> to save your edits.
+      <br><br>For green screen style removal, click:
+      <br><span style="margin-left:2em;"><strong>Pick Color</strong></span>, choose the color from the image,
+      <br>adjust <span style="margin-left:2em;"><strong>Color Sensitivity</strong></span>, then click
+      <br><span style="margin-left:2em;"><strong>Remove Picked Color</strong></span>.
+      <br><br>Turn on <strong>Sprite Safe</strong> to keep color that sits deeper inside a sprite.
+      <br>Use <strong>Edge Distance</strong> to control how far inward matching color can be removed.
+    </p>
+    <br>
+  </details>
+
+  <input type="file" id="fileInput" accept="image/*" multiple><br>
+  <label>Brush Size: <input type="range" id="brushSize" min="1" max="300" value="30"></label>
+  <label><input type="radio" name="mode" value="erase" checked> Erase</label>
+  <label><input type="radio" name="mode" value="restore"> Restore</label>
+  <label><input type="radio" name="mode" value="bucket"> Magic Fill</label>
+  <label>Tolerance: <input type="range" id="tolerance" min="0" max="100" value="30"></label>
+
+  <div id="imagesArea"></div>
+
+  <div id="bottom-controls">
+    <button id="selectAllBtn">Select All</button>
+    <button id="deselectAllBtn">Deselect All</button>
+    <button id="downloadSelectedBtn">Download Selected</button>
+  </div>
+
+  <script>
+    const brushSizeInput = document.getElementById("brushSize");
+    const toleranceInput = document.getElementById("tolerance");
+    const modeRadios = document.querySelectorAll('input[name="mode"]');
+    const imagesArea = document.getElementById("imagesArea");
+    const downloadSelectedBtn = document.getElementById("downloadSelectedBtn");
+    const selectAllBtn = document.getElementById("selectAllBtn");
+    const deselectAllBtn = document.getElementById("deselectAllBtn");
+
+    let brushSize = parseInt(brushSizeInput.value);
+    let tolerance = parseInt(toleranceInput.value);
+    let mode = "erase";
+
+    brushSizeInput.oninput = e => brushSize = parseInt(e.target.value);
+    toleranceInput.oninput = e => tolerance = parseInt(e.target.value);
+    modeRadios.forEach(r => r.onchange = () => mode = document.querySelector('input[name="mode"]:checked').value);
+
+    function colorDistance(c1, c2) {
+      return Math.sqrt((c1[0]-c2[0])**2 + (c1[1]-c2[1])**2 + (c1[2]-c2[2])**2);
+    }
+
+    function getPixel(data, x, y, w) {
+      const i = (y * w + x) * 4;
+      return [data[i], data[i+1], data[i+2], data[i+3]];
+    }
+
+    function setAlpha(data, x, y, w, alpha) {
+      const i = (y * w + x) * 4;
+      data[i+3] = alpha;
+    }
+
+    function floodFill(x, y, data, w, h, base, tol) {
+      const stack = [[x, y]];
+      const visited = new Set();
+      while (stack.length) {
+        const [cx, cy] = stack.pop();
+        const key = `${cx},${cy}`;
+        if (visited.has(key)) continue;
+        visited.add(key);
+        const px = getPixel(data, cx, cy, w);
+        if (px[3] === 0 || colorDistance(px, base) > tol) continue;
+        setAlpha(data, cx, cy, w, 0);
+        if (cx > 0) stack.push([cx-1, cy]);
+        if (cx < w-1) stack.push([cx+1, cy]);
+        if (cy > 0) stack.push([cx, cy-1]);
+        if (cy < h-1) stack.push([cx, cy+1]);
+      }
+    }
+
+    function getEdgeColor(data, w, h) {
+      const sample = [];
+      for (let x = 0; x < w; x++) sample.push([x,0],[x,h-1]);
+      for (let y = 0; y < h; y++) sample.push([0,y],[w-1,y]);
+      return sample.reduce((acc, [x,y]) => {
+        const i = (y*w + x)*4;
+        acc[0] += data[i]; acc[1] += data[i+1]; acc[2] += data[i+2];
+        return acc;
+      }, [0,0,0]).map(v => v/sample.length);
+    }
+
+    class ImageEditor {
+      constructor(file) {
+        this.file = file;
+        this.canvas = document.createElement("canvas");
+        this.ctx = this.canvas.getContext("2d");
+        this.container = document.createElement("div");
+        this.container.className = "image-container";
+
+        this.selectCheckbox = document.createElement("input");
+        this.selectCheckbox.type = "checkbox";
+        this.selectCheckbox.className = "select-checkbox";
+        this.selectCheckbox.checked = true;
+
+        this.undoBtn = document.createElement("button");
+        this.undoBtn.textContent = "Undo";
+
+        this.autoBtn = document.createElement("button");
+        this.autoBtn.textContent = "Auto Process";
+
+        this.downloadBtn = document.createElement("button");
+        this.downloadBtn.textContent = "Download";
+        // Smoothing slider and button
+        this.smoothSlider = document.createElement("input");
+        this.smoothSlider.type = "range";
+        this.smoothSlider.min = 0;
+        this.smoothSlider.max = 100;
+        this.smoothSlider.value = 20;
+        this.smoothSlider.style.width = "80px";
+        this.smoothSlider.id = `smoothSlider_${Date.now()}_${Math.random()}`;
+        this.smoothBtn = document.createElement("button");
+        this.smoothBtn.textContent = "Smooth Edges";
+        this.smoothBtn.className = "smooth-btn";
+        
+        // Edge trimming slider and button
+        this.trimSlider = document.createElement("input");
+        this.trimSlider.type = "range";
+        this.trimSlider.min = 1;
+        this.trimSlider.max = 20;
+        this.trimSlider.value = 1;
+        this.trimSlider.style.width = "80px";
+        this.trimSlider.id = `trimSlider_${Date.now()}_${Math.random()}`;
+        this.trimBtn = document.createElement("button");
+        this.trimBtn.textContent = "Trim Edges";
+        this.trimBtn.className = "trim-btn";
+        
+        // Individual spec size slider and remove specs button
+        this.specSizeSlider = document.createElement("input");
+        this.specSizeSlider.type = "range";
+        this.specSizeSlider.min = 10;
+        this.specSizeSlider.max = 500;
+        this.specSizeSlider.value = 100;
+        this.specSizeSlider.style.width = "80px";
+        this.specSizeSlider.id = `specSizeSlider_${Date.now()}_${Math.random()}`;
+        
+        // Remove specs button
+        this.specBtn = document.createElement("button");
+        this.specBtn.textContent = "Remove Specs";
+        this.specBtn.className = "spec-btn";
+
+        // Eyedropper color removal controls
+        this.pickColorBtn = document.createElement("button");
+        this.pickColorBtn.textContent = "Pick Color";
+        this.pickColorBtn.className = "eyedropper-btn";
+
+        this.colorSensitivitySlider = document.createElement("input");
+        this.colorSensitivitySlider.type = "range";
+        this.colorSensitivitySlider.min = 0;
+        this.colorSensitivitySlider.max = 255;
+        this.colorSensitivitySlider.value = 40;
+        this.colorSensitivitySlider.style.width = "90px";
+        this.colorSensitivitySlider.title = "Color Sensitivity";
+
+        this.colorSensitivityLabel = document.createElement("span");
+        this.colorSensitivityLabel.textContent = `Color Sensitivity: ${this.colorSensitivitySlider.value}`;
+
+        this.spriteControlGroup = document.createElement("label");
+        this.spriteControlGroup.className = "sprite-control-group";
+
+        this.spriteSafeToggle = document.createElement("input");
+        this.spriteSafeToggle.type = "checkbox";
+
+        this.spriteSafeLabel = document.createElement("span");
+        this.spriteSafeLabel.textContent = "Sprite Safe";
+
+        this.edgeDistanceSlider = document.createElement("input");
+        this.edgeDistanceSlider.type = "range";
+        this.edgeDistanceSlider.min = 0;
+        this.edgeDistanceSlider.max = 50;
+        this.edgeDistanceSlider.value = 8;
+
+        this.edgeDistanceLabel = document.createElement("span");
+        this.edgeDistanceLabel.textContent = `Edge Distance: ${this.edgeDistanceSlider.value}`;
+
+        this.spriteControlGroup.appendChild(this.spriteSafeToggle);
+        this.spriteControlGroup.appendChild(this.spriteSafeLabel);
+        this.spriteControlGroup.appendChild(this.edgeDistanceSlider);
+        this.spriteControlGroup.appendChild(this.edgeDistanceLabel);
+
+        this.pickedColorSwatch = document.createElement("span");
+        this.pickedColorSwatch.className = "picked-color-swatch";
+
+        this.pickedColorText = document.createElement("span");
+        this.pickedColorText.textContent = "No color selected";
+
+        this.removePickedColorBtn = document.createElement("button");
+        this.removePickedColorBtn.textContent = "Remove Picked Color";
+        this.removePickedColorBtn.className = "remove-color-btn";
+        // Undo/Redo buttons
+        this.undoBtn2 = document.createElement("button");
+        this.undoBtn2.textContent = "Undo";
+        this.undoBtn2.className = "undo-btn";
+        this.redoBtn = document.createElement("button");
+        this.redoBtn.textContent = "Redo";
+        this.redoBtn.className = "redo-btn";
+        this.controls = document.createElement("div");
+        this.controls.className = "controls";
+        this.controls.appendChild(this.undoBtn);
+        this.controls.appendChild(this.autoBtn);
+        this.controls.appendChild(this.downloadBtn);
+        this.controls.appendChild(this.smoothSlider);
+        this.controls.appendChild(this.smoothBtn);
+        this.controls.appendChild(this.trimSlider);
+        this.controls.appendChild(this.trimBtn);
+        this.controls.appendChild(this.specSizeSlider);
+        this.controls.appendChild(this.specBtn);
+        this.controls.appendChild(this.pickColorBtn);
+        this.controls.appendChild(this.colorSensitivitySlider);
+        this.controls.appendChild(this.colorSensitivityLabel);
+        this.controls.appendChild(this.spriteControlGroup);
+        this.controls.appendChild(this.pickedColorSwatch);
+        this.controls.appendChild(this.pickedColorText);
+        this.controls.appendChild(this.removePickedColorBtn);
+        this.controls.appendChild(this.undoBtn2);
+        this.controls.appendChild(this.redoBtn);
+
+        this.container.appendChild(this.selectCheckbox);
+        this.container.appendChild(this.canvas);
+        this.container.appendChild(this.controls);
+        imagesArea.appendChild(this.container);
+
+        this.img = new Image();
+        this.img.onload = () => this.init();
+        this.img.src = URL.createObjectURL(file);
+
+        this.undoStack = [];
+        this.redoStack = [];
+        this.pickColorMode = false;
+        this.pickedColor = null;
+
+        this.canvas.addEventListener("mousedown", e => { 
+          if (this.pickColorMode) {
+            this.pickColorFromCanvas(e);
+            return;
+          }
+          this.drawing = true; 
+          this.strokeStarted = false;
+          this.canvas.focus({ preventScroll: true }); // Prevent automatic scrolling when focusing
+          this.draw(e); 
+        });
+        this.canvas.addEventListener("mousemove", e => this.drawing && this.draw(e));
+        this.canvas.addEventListener("mouseup", () => this.drawing = false);
+        this.canvas.addEventListener("mouseleave", () => this.drawing = false);
+        
+        // Add keyboard shortcuts for undo/redo
+        this.canvas.tabIndex = 0; // Make canvas focusable
+        this.canvas.addEventListener("keydown", e => {
+          if (e.ctrlKey && e.key === 'z' && !e.shiftKey) {
+            e.preventDefault();
+            this.undo();
+          } else if (e.ctrlKey && e.key === 'y') {
+            e.preventDefault();
+            this.redo();
+          }
+        });
+        
+        this.undoBtn.onclick = () => this.undo();
+        this.autoBtn.onclick = () => this.autoProcess();
+        this.downloadBtn.onclick = () => this.download();
+        this.smoothBtn.onclick = () => this.smoothEdges();
+        this.trimBtn.onclick = () => this.trimEdges();
+        this.specBtn.onclick = () => this.removeSpecs();
+        this.pickColorBtn.onclick = () => this.togglePickColorMode();
+        this.colorSensitivitySlider.oninput = () => {
+          this.colorSensitivityLabel.textContent = `Color Sensitivity: ${this.colorSensitivitySlider.value}`;
+        };
+        this.edgeDistanceSlider.oninput = () => {
+          this.edgeDistanceLabel.textContent = `Edge Distance: ${this.edgeDistanceSlider.value}`;
+        };
+        this.removePickedColorBtn.onclick = () => this.removePickedColor();
+        this.undoBtn2.onclick = () => this.undo();
+        this.redoBtn.onclick = () => this.redo();
+      }
+
+      init() {
+        this.canvas.width = this.img.width;
+        this.canvas.height = this.img.height;
+        this.ctx.drawImage(this.img, 0, 0);
+        this.original = this.ctx.getImageData(0, 0, this.canvas.width, this.canvas.height);
+      }
+
+      autoProcess() {
+        this.save();
+        let id = this.ctx.getImageData(0, 0, this.canvas.width, this.canvas.height);
+        let d = id.data, w = this.canvas.width, h = this.canvas.height;
+        let bg = getEdgeColor(d, w, h);
+        for (let i = 0; i < d.length; i += 4) {
+          let [r,g,b] = [d[i], d[i+1], d[i+2]];
+          let dist = colorDistance([r,g,b], bg);
+          if (dist < 50) d[i+3] = 0;
+        }
+        this.ctx.putImageData(id, 0, 0);
+      }
+
+      draw(e) {
+        const r = this.canvas.getBoundingClientRect();
+        const x = Math.floor(e.clientX - r.left);
+        const y = Math.floor(e.clientY - r.top);
+        
+        // Only save once at the start of a stroke for erase/restore modes
+        if ((mode === "erase" || mode === "restore") && !this.strokeStarted) {
+          this.save();
+          this.strokeStarted = true;
+        }
+        
+        if (mode === "erase") {
+          this.ctx.save();
+          this.ctx.beginPath();
+          this.ctx.arc(x, y, brushSize/2, 0, 2*Math.PI);
+          this.ctx.clip();
+          this.ctx.clearRect(x-brushSize/2, y-brushSize/2, brushSize, brushSize);
+          this.ctx.restore();
+        } else if (mode === "restore") {
+          for (let dx = -brushSize/2; dx < brushSize/2; dx++) {
+            for (let dy = -brushSize/2; dy < brushSize/2; dy++) {
+              const sx = x + dx, sy = y + dy;
+              if (sx < 0 || sy < 0 || sx >= this.canvas.width || sy >= this.canvas.height) continue;
+              const idx = (sy * this.canvas.width + sx) * 4;
+              const r = this.original.data[idx];
+              const g = this.original.data[idx + 1];
+              const b = this.original.data[idx + 2];
+              const a = this.original.data[idx + 3];
+              this.ctx.fillStyle = `rgba(${r},${g},${b},${a/255})`;
+              this.ctx.fillRect(sx, sy, 1, 1);
+            }
+          }
+        } else if (mode === "bucket") {
+          // Magic Fill still saves immediately since it's a single click operation
+          this.save();
+          let id = this.ctx.getImageData(0, 0, this.canvas.width, this.canvas.height);
+          let px = getPixel(id.data, x, y, this.canvas.width);
+          floodFill(x, y, id.data, this.canvas.width, this.canvas.height, px, tolerance);
+          this.ctx.putImageData(id, 0, 0);
+        }
+      }
+
+      save() {
+        this.undoStack.push(this.ctx.getImageData(0, 0, this.canvas.width, this.canvas.height));
+        if (this.undoStack.length > 40) this.undoStack.shift();
+        // Clear redo stack on new action (not on redo)
+        this.redoStack = [];
+      }
+
+      undo() {
+        if (!this.undoStack.length) return;
+        // Save current state to redo stack before undo
+        this.redoStack.push(this.ctx.getImageData(0, 0, this.canvas.width, this.canvas.height));
+        if (this.redoStack.length > 40) this.redoStack.shift();
+        
+        // Restore previous state
+        const last = this.undoStack.pop();
+        this.ctx.putImageData(last, 0, 0);
+      }
+
+      redo() {
+        if (!this.redoStack.length) return;
+        // Save current state to undo stack before redo
+        this.undoStack.push(this.ctx.getImageData(0, 0, this.canvas.width, this.canvas.height));
+        if (this.undoStack.length > 40) this.undoStack.shift();
+        
+        // Restore redo state
+        const redoImg = this.redoStack.pop();
+        this.ctx.putImageData(redoImg, 0, 0);
+      }
+
+      smoothEdges() {
+        this.save();
+        // Smoothing algorithm: erode then dilate based on slider value
+        const level = parseInt(this.smoothSlider.value);
+        console.log(`Smooth edges called with level: ${level} for slider ID: ${this.smoothSlider.id}`);
+        if (level === 0) return; // No smoothing
+        let id = this.ctx.getImageData(0, 0, this.canvas.width, this.canvas.height);
+        let data = id.data, w = this.canvas.width, h = this.canvas.height;
+        // Erode: shrink alpha edges
+        for (let n = 0; n < Math.ceil(level/20); n++) {
+          let newAlpha = new Uint8ClampedArray(data.length);
+          for (let y = 1; y < h-1; y++) {
+            for (let x = 1; x < w-1; x++) {
+              const i = (y*w + x)*4 + 3;
+              if (data[i] === 0) continue;
+              let count = 0;
+              for (let dy = -1; dy <= 1; dy++) {
+                for (let dx = -1; dx <= 1; dx++) {
+                  if (dx === 0 && dy === 0) continue;
+                  if (data[((y+dy)*w + (x+dx))*4 + 3] === 0) count++;
+                }
+              }
+              newAlpha[i] = count > 2 ? 0 : data[i];
+            }
+          }
+          for (let i = 3; i < data.length; i += 4) if (newAlpha[i]) data[i] = newAlpha[i];
+        }
+        // Dilate: grow alpha edges
+        for (let n = 0; n < Math.ceil(level/20); n++) {
+          let newAlpha = new Uint8ClampedArray(data.length);
+          for (let y = 1; y < h-1; y++) {
+            for (let x = 1; x < w-1; x++) {
+              const i = (y*w + x)*4 + 3;
+              if (data[i] !== 0) continue;
+              let count = 0;
+              for (let dy = -1; dy <= 1; dy++) {
+                for (let dx = -1; dx <= 1; dx++) {
+                  if (dx === 0 && dy === 0) continue;
+                  if (data[((y+dy)*w + (x+dx))*4 + 3] > 0) count++;
+                }
+              }
+              newAlpha[i] = count > 2 ? 255 : data[i];
+            }
+          }
+          for (let i = 3; i < data.length; i += 4) if (newAlpha[i]) data[i] = newAlpha[i];
+        }
+        this.ctx.putImageData(id, 0, 0);
+      }
+
+      trimEdges() {
+        this.save();
+        // Trim edges by removing pixels from the boundaries
+        const trimWidth = parseInt(this.trimSlider.value);
+        let id = this.ctx.getImageData(0, 0, this.canvas.width, this.canvas.height);
+        let data = id.data, w = this.canvas.width, h = this.canvas.height;
+        
+        // Create a new array to store the trimmed alpha values
+        let newAlpha = new Uint8ClampedArray(data.length);
+        
+        // Copy existing alpha values
+        for (let i = 3; i < data.length; i += 4) {
+          newAlpha[i] = data[i];
+        }
+        
+        // Find edge pixels and trim them
+        for (let iteration = 0; iteration < trimWidth; iteration++) {
+          let edgePixels = [];
+          
+          // Find all edge pixels (pixels that have at least one transparent neighbor)
+          for (let y = 0; y < h; y++) {
+            for (let x = 0; x < w; x++) {
+              const i = (y * w + x) * 4 + 3;
+              if (newAlpha[i] === 0) continue; // Skip already transparent pixels
+              
+              // Check if this pixel is on an edge (has transparent neighbors)
+              let isEdge = false;
+              for (let dy = -1; dy <= 1 && !isEdge; dy++) {
+                for (let dx = -1; dx <= 1 && !isEdge; dx++) {
+                  if (dx === 0 && dy === 0) continue;
+                  const nx = x + dx, ny = y + dy;
+                  if (nx < 0 || ny < 0 || nx >= w || ny >= h) {
+                    isEdge = true; // Border pixels are edges
+                  } else {
+                    const ni = (ny * w + nx) * 4 + 3;
+                    if (newAlpha[ni] === 0) isEdge = true;
+                  }
+                }
+              }
+              
+              if (isEdge) {
+                edgePixels.push(i);
+              }
+            }
+          }
+          
+          // Remove all edge pixels found in this iteration
+          for (const i of edgePixels) {
+            newAlpha[i] = 0;
+          }
+        }
+        
+        // Apply the new alpha values
+        for (let i = 3; i < data.length; i += 4) {
+          data[i] = newAlpha[i];
+        }
+        
+        this.ctx.putImageData(id, 0, 0);
+      }
+
+      removeSpecs() {
+        this.save();
+        // Remove small isolated specs/blotches - fast and conservative approach
+        const specThreshold = parseInt(this.specSizeSlider.value);
+        console.log(`Remove specs called with threshold: ${specThreshold}`);
+        
+        let id = this.ctx.getImageData(0, 0, this.canvas.width, this.canvas.height);
+        let data = id.data, w = this.canvas.width, h = this.canvas.height;
+        let visited = new Uint8Array(w * h);
+        let componentsToRemove = [];
+        
+        // Simple single-pass approach: find connected components and remove small ones
+        for (let y = 0; y < h; y++) {
+          for (let x = 0; x < w; x++) {
+            const idx = y * w + x;
+            if (visited[idx] || data[idx * 4 + 3] === 0) continue;
+            
+            // Flood fill to find connected component
+            let stack = [[x, y]], component = [];
+            visited[idx] = 1;
+            
+            while (stack.length) {
+              const [cx, cy] = stack.pop();
+              const cIdx = cy * w + cx;
+              component.push(cIdx);
+              
+              // Check 8 neighbors
+              for (let dx = -1; dx <= 1; dx++) {
+                for (let dy = -1; dy <= 1; dy++) {
+                  if (dx === 0 && dy === 0) continue;
+                  const nx = cx + dx, ny = cy + dy;
+                  if (nx < 0 || ny < 0 || nx >= w || ny >= h) continue;
+                  const nIdx = ny * w + nx;
+                  if (visited[nIdx] || data[nIdx * 4 + 3] === 0) continue;
+                  
+                  stack.push([nx, ny]);
+                  visited[nIdx] = 1;
+                }
+              }
+            }
+            
+            // Only remove if component is smaller than threshold
+            if (component.length < specThreshold) {
+              // Additional safety check: make sure this isn't part of main image content
+              if (this.isLikelySpec(component, data, w, h)) {
+                componentsToRemove.push(component);
+              }
+            }
+          }
+        }
+        
+        // Remove identified spec components
+        for (const component of componentsToRemove) {
+          for (const idx of component) {
+            data[idx * 4 + 3] = 0; // Make transparent
+          }
+        }
+        
+        this.ctx.putImageData(id, 0, 0);
+        console.log(`Removed ${componentsToRemove.length} spec components`);
+      }
+
+      togglePickColorMode() {
+        this.pickColorMode = !this.pickColorMode;
+        this.pickColorBtn.classList.toggle("active", this.pickColorMode);
+        this.pickColorBtn.textContent = this.pickColorMode ? "Click Image..." : "Pick Color";
+      }
+
+      pickColorFromCanvas(e) {
+        const r = this.canvas.getBoundingClientRect();
+        const x = Math.floor(e.clientX - r.left);
+        const y = Math.floor(e.clientY - r.top);
+
+        if (x < 0 || y < 0 || x >= this.canvas.width || y >= this.canvas.height) return;
+
+        const pixel = this.ctx.getImageData(x, y, 1, 1).data;
+        this.pickedColor = [pixel[0], pixel[1], pixel[2]];
+
+        this.pickedColorSwatch.style.backgroundColor = `rgb(${pixel[0]}, ${pixel[1]}, ${pixel[2]})`;
+        this.pickedColorText.textContent = `RGB(${pixel[0]}, ${pixel[1]}, ${pixel[2]})`;
+
+        this.pickColorMode = false;
+        this.pickColorBtn.classList.remove("active");
+        this.pickColorBtn.textContent = "Pick Color";
+      }
+
+      removePickedColor() {
+        if (!this.pickedColor) {
+          alert("Pick a color from the image first.");
+          return;
+        }
+
+        this.save();
+
+        const sensitivity = parseInt(this.colorSensitivitySlider.value, 10);
+        const spriteSafe = this.spriteSafeToggle.checked;
+        const edgeDistanceLimit = parseInt(this.edgeDistanceSlider.value, 10);
+        const id = this.ctx.getImageData(0, 0, this.canvas.width, this.canvas.height);
+        const data = id.data;
+
+        if (spriteSafe) {
+          const mask = this.buildPickedColorMask(data, this.canvas.width, this.canvas.height, sensitivity);
+          const edgeDistances = this.getMaskEdgeDistances(mask, this.canvas.width, this.canvas.height);
+
+          for (let i = 0; i < data.length; i += 4) {
+            if (!mask[i / 4]) continue;
+            if (edgeDistances[i / 4] > edgeDistanceLimit) continue;
+            data[i + 3] = 0;
+          }
+        } else {
+          for (let i = 0; i < data.length; i += 4) {
+            if (data[i + 3] === 0) continue;
+
+            const dist = colorDistance([data[i], data[i + 1], data[i + 2]], this.pickedColor);
+            if (dist <= sensitivity) {
+              data[i + 3] = 0;
+            }
+          }
+        }
+
+        this.ctx.putImageData(id, 0, 0);
+      }
+
+      buildPickedColorMask(data, w, h, sensitivity) {
+        const mask = new Uint8Array(w * h);
+        for (let i = 0; i < data.length; i += 4) {
+          if (data[i + 3] === 0) continue;
+          const dist = colorDistance([data[i], data[i + 1], data[i + 2]], this.pickedColor);
+          if (dist <= sensitivity) mask[i / 4] = 1;
+        }
+        return mask;
+      }
+
+      getMaskEdgeDistances(mask, w, h) {
+        const total = w * h;
+        const distances = new Int16Array(total);
+        distances.fill(-1);
+        const queue = [];
+
+        for (let y = 0; y < h; y++) {
+          for (let x = 0; x < w; x++) {
+            const idx = y * w + x;
+            if (!mask[idx]) continue;
+
+            let isEdge = false;
+            const neighbors = [[x - 1, y], [x + 1, y], [x, y - 1], [x, y + 1]];
+            for (const [nx, ny] of neighbors) {
+              if (nx < 0 || ny < 0 || nx >= w || ny >= h || !mask[ny * w + nx]) {
+                isEdge = true;
+                break;
+              }
+            }
+
+            if (isEdge) {
+              distances[idx] = 0;
+              queue.push(idx);
+            }
+          }
+        }
+
+        let head = 0;
+        while (head < queue.length) {
+          const idx = queue[head++];
+          const x = idx % w;
+          const y = Math.floor(idx / w);
+          const nextDistance = distances[idx] + 1;
+          const neighbors = [[x - 1, y], [x + 1, y], [x, y - 1], [x, y + 1]];
+
+          for (const [nx, ny] of neighbors) {
+            if (nx < 0 || ny < 0 || nx >= w || ny >= h) continue;
+            const nIdx = ny * w + nx;
+            if (!mask[nIdx] || distances[nIdx] !== -1) continue;
+            distances[nIdx] = nextDistance;
+            queue.push(nIdx);
+          }
+        }
+
+        return distances;
+      }
+      
+      isLikelySpec(component, data, w, h) {
+        // Safety checks to avoid removing legitimate image content
+        if (component.length < 3) return true; // Very small = definitely spec
+        if (component.length > 200) return false; // Large = probably not spec
+        
+        // Check if component is very elongated (might be part of image detail)
+        let minX = w, maxX = 0, minY = h, maxY = 0;
+        for (const idx of component) {
+          const x = idx % w;
+          const y = Math.floor(idx / w);
+          minX = Math.min(minX, x);
+          maxX = Math.max(maxX, x);
+          minY = Math.min(minY, y);
+          maxY = Math.max(maxY, y);
+        }
+        
+        const width = maxX - minX + 1;
+        const height = maxY - minY + 1;
+        const aspectRatio = Math.max(width, height) / Math.min(width, height);
+        
+        // If very elongated, probably part of image content (like hair, lines, etc.)
+        if (aspectRatio > 8) return false;
+        
+        // Check if component is mostly at edges (might be part of main subject)
+        const centerX = w / 2;
+        const centerY = h / 2;
+        const compCenterX = (minX + maxX) / 2;
+        const compCenterY = (minY + maxY) / 2;
+        const distanceFromCenter = Math.sqrt((compCenterX - centerX) ** 2 + (compCenterY - centerY) ** 2);
+        const maxDistance = Math.sqrt(centerX ** 2 + centerY ** 2);
+        
+        // If very close to center and medium sized, be more conservative
+        if (distanceFromCenter < maxDistance * 0.3 && component.length > 50) return false;
+        
+        return true; // Likely a spec
+      }
+
+      download() {
+        // Create a download link and trigger it
+        const link = document.createElement("a");
+        link.download = this.file.name.replace(/\.[^.]+$/, "-cleaned.png");
+        
+        // Convert canvas to blob and create object URL
+        this.canvas.toBlob((blob) => {
+          const url = URL.createObjectURL(blob);
+          link.href = url;
+          
+          // Trigger download
+          document.body.appendChild(link);
+          link.click();
+          document.body.removeChild(link);
+          
+          // Clean up the object URL
+          setTimeout(() => URL.revokeObjectURL(url), 100);
+        }, "image/png");
+      }
+    }
+
+    const editors = [];
+    document.getElementById("fileInput").onchange = e => {
+      [...e.target.files].forEach(f => editors.push(new ImageEditor(f)));
+    };
+
+    downloadSelectedBtn.onclick = () => {
+      editors.forEach(ed => ed.selectCheckbox.checked && ed.download());
+    };
+
+    selectAllBtn.onclick = () => editors.forEach(ed => ed.selectCheckbox.checked = true);
+    deselectAllBtn.onclick = () => editors.forEach(ed => ed.selectCheckbox.checked = false);
+    
+    // Global keyboard shortcuts - works when not focused on any specific canvas
+    document.addEventListener('keydown', (e) => {
+      if (e.ctrlKey && e.key === 'z' && !e.shiftKey) {
+        e.preventDefault();
+        // Find the last active editor (if any)
+        const lastActive = editors.find(ed => ed.canvas === document.activeElement) || editors[editors.length - 1];
+        if (lastActive) lastActive.undo();
+      } else if (e.ctrlKey && e.key === 'y') {
+        e.preventDefault();
+        // Find the last active editor (if any)
+        const lastActive = editors.find(ed => ed.canvas === document.activeElement) || editors[editors.length - 1];
+        if (lastActive) lastActive.redo();
+      }
+    });
+  </script>
+</body>
+</html>
